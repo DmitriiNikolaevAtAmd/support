@@ -28,11 +28,22 @@ def run_pretrain():
     recipe.model.config.fp8 = "hybrid"  
     recipe.model.config.fp8_param = True
     
-    # 5. DISABLE PERSISTENCE FOR TEST RUN
+    # 5. DISABLE ALL CHECKPOINTING AND INTERMEDIATE SAVES
+    # Only logs and benchmark profiles will be saved
     recipe.trainer.enable_checkpointing = False
-    recipe.resume = None
+    recipe.log.ckpt = None  # Disable checkpoint callback
+    recipe.resume = None    # No resume from checkpoint
+    
+    # Disable TensorBoard and other loggers (keep only benchmark)
+    recipe.log.tensorboard = None
+    recipe.log.wandb = None
+    
+    # Set validation to None to avoid validation checkpoints
+    recipe.trainer.val_check_interval = None
+    recipe.trainer.check_val_every_n_epoch = None
     
     # 6. ADD BENCHMARK CALLBACK FOR AMD vs NVIDIA COMPARISON
+    # This only saves lightweight JSON logs to ./benchmark_results/
     benchmark_callback = BenchmarkCallback(
         output_dir="./benchmark_results",
         platform="auto"  # Auto-detects CUDA or ROCm
