@@ -2,7 +2,7 @@ from nemo.collections import llm
 import nemo_run as run
 
 def run_pretrain():
-    # Use Mistral 7B model
+    # 1. Initialize the recipe
     recipe = llm.mistral_7b.pretrain_recipe(
         name="mistral_7b_pretrain_fp8",
         dir="/checkpoints",
@@ -10,23 +10,35 @@ def run_pretrain():
         num_gpus_per_node=8,
     )
     
+    # 2. MATCH TRAINER TO NVIDIA-SMI HARDWARE
+    # This explicitly tells the trainer to use all 8 GPUs.
+    recipe.trainer.devices = 8
+    recipe.trainer.num_nodes = 1
+    
+    # 3. PARALLELISM CONFIGURATION
+    # TP (4) * PP (1) * CP (1) = 4 GPUs per model instance.
+    # Total GPUs (8) / 4 = 2-way Data Parallelism.
+    recipe.trainer.strategy.tensor_model_parallel_size = 4
+    recipe.trainer.strategy.pipeline_model_parallel_size = 1
+    recipe.trainer.strategy.context_parallel_size = 1
+    
+    # 4. DATA CONFIGURATION
+    # Global Batch Size (8) / Data Parallel (2) = 4 samples per DP group.
+    # With Micro Batch Size = 1, this means 4 accumulation steps.
     recipe.data.micro_batch_size = 1
     recipe.data.global_batch_size = 8
-    recipe.trainer.max_steps = 10
     
+    # 5. OPTIMIZATIONS & DURATION
+    recipe.trainer.max_steps = 10
     recipe.model.config.fp8 = "hybrid"  
     recipe.model.config.fp8_param = True
     
-    # Use 4 for tensor parallel (32 heads / 4 = 8 heads per GPU)
-    # Use 2 for pipeline parallel to utilize all 8 GPUs (4 * 2 = 8)
-    recipe.trainer.strategy.tensor_model_parallel_size = 4
-    recipe.trainer.strategy.pipeline_model_parallel_size = 2
-    
+    # 6. DISABLE PERSISTENCE FOR TEST RUN
     recipe.trainer.enable_checkpointing = False
     recipe.resume = None
     
+    # 7. EXECUTE
     run.run(recipe, direct=True)
 
 if __name__ == "__main__":
     run_pretrain()
-
