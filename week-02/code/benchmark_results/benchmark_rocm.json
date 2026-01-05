@@ -1,0 +1,44 @@
+{
+  "platform": "cuda",
+  "gpu_info": {
+    "device_count": 8,
+    "device_name": "AMD Instinct MI300X",
+    "total_memory_gb": 206.141652992,
+    "platform": "cuda",
+    "cuda_version": null
+  },
+  "timestamp": "2026-01-05T11:33:57.573661",
+  "training_config": {
+    "max_steps": 10,
+    "global_batch_size": 128,
+    "sequence_length": 2048,
+    "num_gpus": 8
+  },
+  "performance_metrics": {
+    "total_steps": 10,
+    "total_time_seconds": 121.5577,
+    "avg_step_time_seconds": 9.763411111111111,
+    "min_step_time_seconds": 9.6993,
+    "max_step_time_seconds": 9.8363,
+    "steps_per_second": 0.10242321957148401,
+    "tokens_per_second": 107400.71111111112,
+    "tokens_per_second_per_gpu": 13425.08888888889
+  },
+  "raw_step_times": [
+    33.687,
+    9.8363,
+    9.702200000000001,
+    9.6993,
+    9.7289,
+    9.764899999999999,
+    9.759799999999998,
+    9.7946,
+    9.7929,
+    9.791799999999999
+  ],
+  "source": "primus_log_extraction",
+  "memory_metrics": {
+    "avg_memory_allocated_gb": 117.98999999999998,
+    "peak_memory_allocated_gb": 117.99
+  }
+}
