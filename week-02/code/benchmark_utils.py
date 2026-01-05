@@ -40,6 +40,9 @@ class BenchmarkCallback(Callback):
         self.step_start_time = None
         self.train_start_time = None
         self.gpu_info = {}
+        self.global_batch_size = None
+        self.sequence_length = None
+        self.num_gpus = None
     
     def _get_gpu_core_count(self, device_name: str, device_props) -> int:
         """
@@ -122,6 +125,15 @@ class BenchmarkCallback(Callback):
         """Collect GPU information at training start."""
         self.train_start_time = time.time()
         
+        # Get training configuration
+        self.num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        
+        # Try to get batch size and sequence length from datamodule
+        if hasattr(trainer, 'datamodule'):
+            self.global_batch_size = getattr(trainer.datamodule, 'global_batch_size', None)
+            self.sequence_length = getattr(trainer.datamodule, 'seq_length', 
+                                          getattr(trainer.datamodule, 'sequence_length', 2048))  # Default 2048
+        
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties(0)
             device_name = torch.cuda.get_device_name(0)
@@ -131,7 +143,7 @@ class BenchmarkCallback(Callback):
             
             self.gpu_info = {
                 "platform": self.platform,
-                "device_count": torch.cuda.device_count(),
+                "device_count": self.num_gpus,
                 "device_name": device_name,
                 "total_memory_gb": device_props.total_memory / 1e9,
                 "gpu_cores": gpu_cores,
@@ -197,7 +209,22 @@ class BenchmarkCallback(Callback):
             # Skip first step (warmup)
             step_times_no_warmup = self.step_times[1:]
             
-            throughput = len(step_times_no_warmup) / sum(step_times_no_warmup)
+            avg_step_time = sum(step_times_no_warmup) / len(step_times_no_warmup)
+            steps_per_second = len(step_times_no_warmup) / sum(step_times_no_warmup)
+            
+            # Calculate token-based throughput
+            # Throughput = tokens processed per second (total system throughput)
+            # Tokens/sec/GPU = throughput per GPU (efficiency metric independent of cluster size)
+            tokens_per_second = None
+            tokens_per_second_per_gpu = None
+            
+            if self.global_batch_size and self.sequence_length:
+                # Tokens per step = global_batch_size × sequence_length
+                tokens_per_step = self.global_batch_size * self.sequence_length
+                # Total system throughput in tokens/sec
+                tokens_per_second = tokens_per_step / avg_step_time
+                # Per-GPU throughput (efficiency metric)
+                tokens_per_second_per_gpu = tokens_per_second / self.num_gpus if self.num_gpus else None
             
             results = {
                 "platform": self.platform,
@@ -205,17 +232,23 @@ class BenchmarkCallback(Callback):
                 "timestamp": datetime.now().isoformat(),
                 "training_config": {
                     "max_steps": trainer.max_steps,
-                    "global_batch_size": getattr(trainer.datamodule, 'global_batch_size', 'N/A'),
+                    "global_batch_size": self.global_batch_size or 'N/A',
                     "micro_batch_size": getattr(trainer.datamodule, 'micro_batch_size', 'N/A'),
+                    "sequence_length": self.sequence_length or 'N/A',
+                    "num_gpus": self.num_gpus,
                 },
                 "performance_metrics": {
                     "total_steps": len(self.step_times),
                     "total_time_seconds": total_time,
-                    "avg_step_time_seconds": sum(step_times_no_warmup) / len(step_times_no_warmup),
+                    "avg_step_time_seconds": avg_step_time,
                     "min_step_time_seconds": min(step_times_no_warmup),
                     "max_step_time_seconds": max(step_times_no_warmup),
-                    "throughput_steps_per_second": throughput,
-                    "throughput_per_gpu_core": throughput / self.gpu_info["gpu_cores"] if self.gpu_info.get("gpu_cores", 0) > 0 else 0,
+                    "steps_per_second": steps_per_second,
+                    # Primary throughput metrics (token-based)
+                    "tokens_per_second": tokens_per_second,  # Total system throughput
+                    "tokens_per_second_per_gpu": tokens_per_second_per_gpu,  # Per-GPU efficiency
+                    # Secondary metrics (for reference)
+                    "throughput_per_gpu_core": steps_per_second / self.gpu_info["gpu_cores"] if self.gpu_info.get("gpu_cores", 0) > 0 else 0,
                 },
                 "raw_step_times": self.step_times,
             }
@@ -240,18 +273,26 @@ class BenchmarkCallback(Callback):
             print(f"\n{'='*60}")
             print(f"BENCHMARK COMPLETE - Platform: {self.platform.upper()}")
             print(f"{'='*60}")
+            print(f"GPUs: {self.num_gpus}")
             print(f"Total Steps: {results['performance_metrics']['total_steps']}")
             print(f"Total Time: {total_time:.2f}s")
             print(f"Avg Step Time: {results['performance_metrics']['avg_step_time_seconds']:.3f}s")
-            print(f"Throughput: {results['performance_metrics']['throughput_steps_per_second']:.3f} steps/s")
             
-            if self.gpu_info.get("gpu_cores", 0) > 0:
-                print(f"GPU Cores: {self.gpu_info['gpu_cores']:,}")
-                print(f"Throughput/Core: {results['performance_metrics']['throughput_per_gpu_core']:.6f} steps/s/core")
+            # Primary throughput metrics (token-based)
+            if results['performance_metrics']['tokens_per_second']:
+                print(f"\nThroughput Metrics:")
+                print(f"  Total Throughput: {results['performance_metrics']['tokens_per_second']:,.0f} tokens/sec")
+                print(f"  Per-GPU Throughput: {results['performance_metrics']['tokens_per_second_per_gpu']:,.0f} tokens/sec/GPU")
+                print(f"  (Global batch size: {self.global_batch_size}, Sequence length: {self.sequence_length})")
+            else:
+                print(f"Throughput: {results['performance_metrics']['steps_per_second']:.3f} steps/s")
+                print(f"  (Token-based metrics unavailable - need batch size & sequence length)")
             
             if 'memory_metrics' in results:
-                print(f"Avg Memory: {results['memory_metrics']['avg_memory_allocated_gb']:.2f}GB")
-                print(f"Peak Memory: {results['memory_metrics']['peak_memory_allocated_gb']:.2f}GB")
+                print(f"\nMemory Usage:")
+                print(f"  Avg Memory: {results['memory_metrics']['avg_memory_allocated_gb']:.2f}GB")
+                print(f"  Peak Memory: {results['memory_metrics']['peak_memory_allocated_gb']:.2f}GB")
+            
             print(f"\nResults saved to: {filepath}")
             print(f"{'='*60}\n")
 
@@ -292,60 +333,76 @@ def compare_benchmarks(results_dir: str = "./benchmark_results") -> Dict:
     comparison = {
         "cuda": {
             "device": cuda['gpu_info']['device_name'],
-            "gpu_cores": cuda['gpu_info'].get('gpu_cores', 0),
+            "num_gpus": cuda['gpu_info'].get('device_count', cuda['training_config'].get('num_gpus', 'N/A')),
             "avg_step_time": cuda['performance_metrics']['avg_step_time_seconds'],
-            "throughput": cuda['performance_metrics']['throughput_steps_per_second'],
-            "throughput_per_core": cuda['performance_metrics'].get('throughput_per_gpu_core', 0),
+            "tokens_per_second": cuda['performance_metrics'].get('tokens_per_second'),
+            "tokens_per_second_per_gpu": cuda['performance_metrics'].get('tokens_per_second_per_gpu'),
+            "steps_per_second": cuda['performance_metrics'].get('steps_per_second'),
             "peak_memory": cuda.get('memory_metrics', {}).get('peak_memory_allocated_gb', 'N/A'),
         },
         "rocm": {
             "device": rocm['gpu_info']['device_name'],
-            "gpu_cores": rocm['gpu_info'].get('gpu_cores', 0),
+            "num_gpus": rocm['gpu_info'].get('device_count', rocm['training_config'].get('num_gpus', 'N/A')),
             "avg_step_time": rocm['performance_metrics']['avg_step_time_seconds'],
-            "throughput": rocm['performance_metrics']['throughput_steps_per_second'],
-            "throughput_per_core": rocm['performance_metrics'].get('throughput_per_gpu_core', 0),
+            "tokens_per_second": rocm['performance_metrics'].get('tokens_per_second'),
+            "tokens_per_second_per_gpu": rocm['performance_metrics'].get('tokens_per_second_per_gpu'),
+            "steps_per_second": rocm['performance_metrics'].get('steps_per_second'),
             "peak_memory": rocm.get('memory_metrics', {}).get('peak_memory_allocated_gb', 'N/A'),
         }
     }
     
-    # Calculate speedup
+    # Calculate speedup based on time (lower is better)
     cuda_time = cuda['performance_metrics']['avg_step_time_seconds']
     rocm_time = rocm['performance_metrics']['avg_step_time_seconds']
     
     comparison["speedup"] = {
-        "faster_platform": "CUDA" if cuda_time < rocm_time else "ROCm",
+        "faster_platform": "NVIDIA" if cuda_time < rocm_time else "AMD",
         "speedup_factor": max(cuda_time, rocm_time) / min(cuda_time, rocm_time),
         "time_difference_seconds": abs(cuda_time - rocm_time),
-        "throughput_ratio": comparison["cuda"]["throughput"] / comparison["rocm"]["throughput"],
     }
+    
+    # Add throughput ratios (tokens/sec/GPU - higher is better)
+    if comparison["cuda"]["tokens_per_second_per_gpu"] and comparison["rocm"]["tokens_per_second_per_gpu"]:
+        comparison["speedup"]["tokens_per_gpu_ratio"] = (
+            comparison["cuda"]["tokens_per_second_per_gpu"] / comparison["rocm"]["tokens_per_second_per_gpu"]
+        )
+    elif comparison["cuda"]["steps_per_second"] and comparison["rocm"]["steps_per_second"]:
+        comparison["speedup"]["tokens_per_gpu_ratio"] = (
+            comparison["cuda"]["steps_per_second"] / comparison["rocm"]["steps_per_second"]
+        )
     
     # Print comparison
     print(f"\n{'='*80}")
     print("AMD vs NVIDIA GPU COMPARISON")
     print(f"{'='*80}")
-    print(f"\nNVIDIA GPU ({comparison['cuda']['device']}):")
-    print(f"  GPU Cores:       {comparison['cuda']['gpu_cores']:,}")
+    print(f"\nNVIDIA ({comparison['cuda']['device']}):")
+    print(f"  GPUs:            {comparison['cuda']['num_gpus']}")
     print(f"  Avg Step Time:   {comparison['cuda']['avg_step_time']:.4f}s")
-    print(f"  Throughput:      {comparison['cuda']['throughput']:.3f} steps/s")
-    if comparison['cuda']['throughput_per_core'] > 0:
-        print(f"  Throughput/Core: {comparison['cuda']['throughput_per_core']:.6f} steps/s/core")
+    
+    if comparison['cuda']['tokens_per_second_per_gpu']:
+        print(f"  Throughput:      {comparison['cuda']['tokens_per_second']:,.0f} tokens/sec (total)")
+        print(f"  Tokens/sec/GPU:  {comparison['cuda']['tokens_per_second_per_gpu']:,.0f}")
+    else:
+        print(f"  Throughput:      {comparison['cuda']['steps_per_second']:.3f} steps/s")
+    
     print(f"  Peak Memory:     {comparison['cuda']['peak_memory']}GB")
     
-    print(f"\nAMD GPU ({comparison['rocm']['device']}):")
-    print(f"  GPU Cores:       {comparison['rocm']['gpu_cores']:,}")
+    print(f"\nAMD ({comparison['rocm']['device']}):")
+    print(f"  GPUs:            {comparison['rocm']['num_gpus']}")
     print(f"  Avg Step Time:   {comparison['rocm']['avg_step_time']:.4f}s")
-    print(f"  Throughput:      {comparison['rocm']['throughput']:.3f} steps/s")
-    if comparison['rocm']['throughput_per_core'] > 0:
-        print(f"  Throughput/Core: {comparison['rocm']['throughput_per_core']:.6f} steps/s/core")
+    
+    if comparison['rocm']['tokens_per_second_per_gpu']:
+        print(f"  Throughput:      {comparison['rocm']['tokens_per_second']:,.0f} tokens/sec (total)")
+        print(f"  Tokens/sec/GPU:  {comparison['rocm']['tokens_per_second_per_gpu']:,.0f}")
+    else:
+        print(f"  Throughput:      {comparison['rocm']['steps_per_second']:.3f} steps/s")
+    
     print(f"  Peak Memory:     {comparison['rocm']['peak_memory']}GB")
     
     print(f"\nResult:")
-    print(f"  {comparison['speedup']['faster_platform']} is {comparison['speedup']['speedup_factor']:.2f}x faster")
-    print(f"  Throughput ratio (NVIDIA/AMD): {comparison['speedup']['throughput_ratio']:.2f}x")
-    
-    if comparison['cuda']['throughput_per_core'] > 0 and comparison['rocm']['throughput_per_core'] > 0:
-        per_core_ratio = comparison['cuda']['throughput_per_core'] / comparison['rocm']['throughput_per_core']
-        print(f"  Per-core efficiency (NVIDIA/AMD): {per_core_ratio:.2f}x")
+    print(f"  {comparison['speedup']['faster_platform']} is {comparison['speedup']['speedup_factor']:.2f}x faster (by time)")
+    if 'tokens_per_gpu_ratio' in comparison['speedup']:
+        print(f"  Tokens/sec/GPU ratio (NVIDIA/AMD): {comparison['speedup']['tokens_per_gpu_ratio']:.2f}x")
     
     print(f"{'='*80}\n")
     
