@@ -42,59 +42,62 @@ def extract_step_times_from_log(log_file):
     """
     Extract step timing from Primus/Megatron logs.
     
-    Looks for patterns like:
-    - "iteration 10/100 | time elapsed: 1.23s"
-    - "step=10 time=1.23"
-    - "Iteration 10 took 1.23 seconds"
+    Primus format:
+    elapsed time per iteration (ms): 9836.3/21761.7
     """
     step_times = []
-    
-    # Common patterns in Megatron/Primus logs
-    patterns = [
-        r'iteration\s+\d+.*?time.*?([0-9.]+)\s*s',  # iteration X | time: Y s
-        r'step=\d+.*?time=([0-9.]+)',                # step=X time=Y
-        r'Iteration\s+\d+.*?took\s+([0-9.]+)',       # Iteration X took Y
-        r'elapsed time per iteration.*?:\s*([0-9.]+)', # elapsed time per iteration: X
-        r'training_time_per_iteration:\s*([0-9.]+)',  # training_time_per_iteration: X
-    ]
+    tokens_per_gpu_values = []
     
     with open(log_file, 'r') as f:
         for line in f:
-            for pattern in patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    try:
-                        step_time = float(match.group(1))
-                        if 0.001 < step_time < 1000:  # Sanity check
-                            step_times.append(step_time)
-                            break  # Found match, try next line
-                    except (ValueError, IndexError):
-                        continue
+            # Primus format: elapsed time per iteration (ms): 9836.3/21761.7
+            # First value is current iteration, second is average
+            match = re.search(r'elapsed time per iteration \(ms\):\s*([0-9.]+)/([0-9.]+)', line)
+            if match:
+                try:
+                    # Get current iteration time in ms, convert to seconds
+                    step_time_ms = float(match.group(1))
+                    step_time_s = step_time_ms / 1000.0
+                    
+                    if 0.001 < step_time_s < 1000:  # Sanity check
+                        step_times.append(step_time_s)
+                except (ValueError, IndexError):
+                    continue
+            
+            # Also extract tokens per GPU if available
+            # tokens per GPU (tokens/s/GPU): 13325.3/8608.1
+            tokens_match = re.search(r'tokens per GPU \(tokens/s/GPU\):\s*([0-9.]+)/([0-9.]+)', line)
+            if tokens_match:
+                try:
+                    tokens_per_gpu = float(tokens_match.group(1))
+                    if 0 < tokens_per_gpu < 1000000:  # Sanity check
+                        tokens_per_gpu_values.append(tokens_per_gpu)
+                except (ValueError, IndexError):
+                    continue
     
-    return step_times
+    return step_times, tokens_per_gpu_values
 
 
 def extract_memory_from_log(log_file):
-    """Extract GPU memory usage from log."""
-    memory_values = []
+    """
+    Extract GPU memory usage from log.
     
-    patterns = [
-        r'memory.*?([0-9.]+)\s*GB',
-        r'allocated:\s*([0-9.]+)\s*GB',
-        r'reserved:\s*([0-9.]+)\s*GB',
-    ]
+    Primus format:
+    hip mem usage/free/total/usage_ratio: 117.99GB/74.00GB/191.98GB/61.46%
+    """
+    memory_values = []
     
     with open(log_file, 'r') as f:
         for line in f:
-            for pattern in patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    try:
-                        memory_gb = float(match.group(1))
-                        if 0 < memory_gb < 1000:  # Sanity check
-                            memory_values.append(memory_gb)
-                    except (ValueError, IndexError):
-                        continue
+            # Primus format: hip mem usage/free/total/usage_ratio: 117.99GB/...
+            match = re.search(r'hip mem usage[^:]*:\s*([0-9.]+)GB', line)
+            if match:
+                try:
+                    memory_gb = float(match.group(1))
+                    if 0 < memory_gb < 1000:  # Sanity check
+                        memory_values.append(memory_gb)
+                except (ValueError, IndexError):
+                    continue
     
     return memory_values
 
@@ -104,19 +107,26 @@ def extract_metrics_from_log(log_file, num_gpus, global_batch_size, seq_length):
     
     print(f"Analyzing log file: {log_file}")
     
-    # Extract step times
-    step_times = extract_step_times_from_log(log_file)
+    # Extract step times and tokens per GPU
+    step_times, tokens_per_gpu_values = extract_step_times_from_log(log_file)
     
     if not step_times:
         print("⚠️  No timing data found in log file")
         print("     Log file might use different format.")
         print("     Check the log manually and adjust regex patterns.")
+        print("\n     Expected format: 'elapsed time per iteration (ms): X/Y'")
         return None
     
     print(f"✅ Found {len(step_times)} step timing entries")
     
+    if tokens_per_gpu_values:
+        print(f"✅ Found {len(tokens_per_gpu_values)} tokens/GPU entries (using Primus native metrics)")
+    
     # Extract memory (optional)
     memory_values = extract_memory_from_log(log_file)
+    
+    if memory_values:
+        print(f"✅ Found {len(memory_values)} memory usage entries")
     
     # Auto-detect GPU info
     gpu_info = detect_gpu_info()
@@ -134,9 +144,20 @@ def extract_metrics_from_log(log_file, num_gpus, global_batch_size, seq_length):
     max_step_time = max(step_times_no_warmup)
     
     # Calculate token-based throughput
-    tokens_per_step = global_batch_size * seq_length
-    tokens_per_second = tokens_per_step / avg_step_time
-    tokens_per_second_per_gpu = tokens_per_second / num_gpus
+    # Prefer Primus native metrics if available, otherwise calculate
+    if tokens_per_gpu_values:
+        # Use Primus reported tokens/s/GPU (skip warmup)
+        tokens_per_gpu_no_warmup = tokens_per_gpu_values[1:] if len(tokens_per_gpu_values) > 1 else tokens_per_gpu_values
+        tokens_per_second_per_gpu = sum(tokens_per_gpu_no_warmup) / len(tokens_per_gpu_no_warmup)
+        tokens_per_second = tokens_per_second_per_gpu * num_gpus
+        print(f"📊 Using Primus native tokens/s/GPU: {tokens_per_second_per_gpu:.1f}")
+    else:
+        # Calculate from batch size and sequence length
+        tokens_per_step = global_batch_size * seq_length
+        tokens_per_second = tokens_per_step / avg_step_time
+        tokens_per_second_per_gpu = tokens_per_second / num_gpus
+        print(f"📊 Calculated tokens/s/GPU: {tokens_per_second_per_gpu:.1f}")
+    
     steps_per_second = 1.0 / avg_step_time
     
     results = {
