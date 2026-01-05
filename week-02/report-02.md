@@ -123,6 +123,10 @@ docker run --gpus all -it --rm \
   nvcr.io/nvidia/nemo:25.04 bash
 ```
 
+Resume work if container exists
+
+docker exec -it primat bash
+
 Loggin into Hugging Face account
 
 ```
