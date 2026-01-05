@@ -36,11 +36,23 @@ def load_benchmark_results(results_dir: str) -> Tuple[List[Dict], List[Dict]]:
 def create_comparison_plot(cuda_data: Dict, rocm_data: Dict, output_file: str = "comparison.png"):
     """Create visual comparison of AMD vs NVIDIA performance."""
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Check if we have per-core data
+    has_per_core = (cuda_data['performance_metrics'].get('throughput_per_gpu_core', 0) > 0 and 
+                    rocm_data['performance_metrics'].get('throughput_per_gpu_core', 0) > 0)
+    
+    if has_per_core:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
     fig.suptitle('AMD vs NVIDIA GPU Comparison', fontsize=16, fontweight='bold')
     
+    # Flatten axes for easier indexing if we have 2x3 grid
+    if has_per_core:
+        axes = axes.flatten()
+    
     # 1. Average Step Time Comparison
-    ax1 = axes[0, 0]
+    ax1 = axes[0] if has_per_core else axes[0, 0]
     platforms = ['NVIDIA\n' + cuda_data['gpu_info']['device_name'], 
                  'AMD\n' + rocm_data['gpu_info']['device_name']]
     step_times = [
@@ -61,7 +73,7 @@ def create_comparison_plot(cuda_data: Dict, rocm_data: Dict, output_file: str = 
                 ha='center', va='bottom', fontweight='bold')
     
     # 2. Throughput Comparison
-    ax2 = axes[0, 1]
+    ax2 = axes[1] if has_per_core else axes[0, 1]
     throughputs = [
         cuda_data['performance_metrics']['throughput_steps_per_second'],
         rocm_data['performance_metrics']['throughput_steps_per_second']
@@ -77,8 +89,27 @@ def create_comparison_plot(cuda_data: Dict, rocm_data: Dict, output_file: str = 
                 f'{value:.3f}',
                 ha='center', va='bottom', fontweight='bold')
     
-    # 3. Memory Usage Comparison
-    ax3 = axes[1, 0]
+    # 3. Throughput per Core Comparison (if available)
+    if has_per_core:
+        ax3 = axes[2]
+        throughput_per_core = [
+            cuda_data['performance_metrics']['throughput_per_gpu_core'],
+            rocm_data['performance_metrics']['throughput_per_gpu_core']
+        ]
+        bars = ax3.bar(platforms, throughput_per_core, color=colors, alpha=0.7, edgecolor='black')
+        ax3.set_ylabel('Steps/Second/Core', fontweight='bold')
+        ax3.set_title('Throughput per GPU Core (Higher is Better)')
+        ax3.grid(axis='y', alpha=0.3)
+        ax3.ticklabel_format(style='scientific', axis='y', scilimits=(0,0))
+        
+        for bar, value in zip(bars, throughput_per_core):
+            height = bar.get_height()
+            ax3.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{value:.6f}',
+                    ha='center', va='bottom', fontweight='bold', fontsize=9)
+    
+    # 4. Memory Usage Comparison
+    ax4 = axes[3] if has_per_core else axes[1, 0]
     if 'memory_metrics' in cuda_data and 'memory_metrics' in rocm_data:
         memory_data = {
             'Average': [
@@ -94,39 +125,57 @@ def create_comparison_plot(cuda_data: Dict, rocm_data: Dict, output_file: str = 
         x = np.arange(len(platforms))
         width = 0.35
         
-        bars1 = ax3.bar(x - width/2, memory_data['Average'], width, 
+        bars1 = ax4.bar(x - width/2, memory_data['Average'], width, 
                        label='Average', alpha=0.7, edgecolor='black')
-        bars2 = ax3.bar(x + width/2, memory_data['Peak'], width,
+        bars2 = ax4.bar(x + width/2, memory_data['Peak'], width,
                        label='Peak', alpha=0.7, edgecolor='black')
         
-        ax3.set_ylabel('Memory (GB)', fontweight='bold')
-        ax3.set_title('GPU Memory Usage')
-        ax3.set_xticks(x)
-        ax3.set_xticklabels(platforms)
-        ax3.legend()
-        ax3.grid(axis='y', alpha=0.3)
+        ax4.set_ylabel('Memory (GB)', fontweight='bold')
+        ax4.set_title('GPU Memory Usage')
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(platforms)
+        ax4.legend()
+        ax4.grid(axis='y', alpha=0.3)
     else:
-        ax3.text(0.5, 0.5, 'Memory data not available', 
-                ha='center', va='center', transform=ax3.transAxes)
-        ax3.set_title('GPU Memory Usage')
+        ax4.text(0.5, 0.5, 'Memory data not available', 
+                ha='center', va='center', transform=ax4.transAxes)
+        ax4.set_title('GPU Memory Usage')
     
-    # 4. Step Time Distribution
-    ax4 = axes[1, 1]
+    # 5. Step Time Distribution
+    ax5 = axes[4] if has_per_core else axes[1, 1]
     cuda_times = cuda_data['raw_step_times'][1:]  # Skip warmup
     rocm_times = rocm_data['raw_step_times'][1:]  # Skip warmup
     
-    ax4.plot(range(len(cuda_times)), cuda_times, 
+    ax5.plot(range(len(cuda_times)), cuda_times, 
             label=f"NVIDIA ({cuda_data['gpu_info']['device_name']})",
             color='#76B900', marker='o', markersize=4, linewidth=2, alpha=0.7)
-    ax4.plot(range(len(rocm_times)), rocm_times,
+    ax5.plot(range(len(rocm_times)), rocm_times,
             label=f"AMD ({rocm_data['gpu_info']['device_name']})",
             color='#ED1C24', marker='s', markersize=4, linewidth=2, alpha=0.7)
     
-    ax4.set_xlabel('Step Number', fontweight='bold')
-    ax4.set_ylabel('Time (seconds)', fontweight='bold')
-    ax4.set_title('Step Time Over Training')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
+    ax5.set_xlabel('Step Number', fontweight='bold')
+    ax5.set_ylabel('Time (seconds)', fontweight='bold')
+    ax5.set_title('Step Time Over Training')
+    ax5.legend()
+    ax5.grid(True, alpha=0.3)
+    
+    # 6. GPU Core Count Comparison (if has_per_core)
+    if has_per_core:
+        ax6 = axes[5]
+        core_counts = [
+            cuda_data['gpu_info']['gpu_cores'],
+            rocm_data['gpu_info']['gpu_cores']
+        ]
+        bars = ax6.bar(platforms, core_counts, color=colors, alpha=0.7, edgecolor='black')
+        ax6.set_ylabel('Number of Cores', fontweight='bold')
+        ax6.set_title('GPU Core Count')
+        ax6.grid(axis='y', alpha=0.3)
+        
+        for bar, value in zip(bars, core_counts):
+            height = bar.get_height()
+            ax6.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{value:,}',
+                    ha='center', va='bottom', fontweight='bold')
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -164,12 +213,14 @@ def generate_comparison_report(cuda_data: Dict, rocm_data: Dict, output_file: st
 
 ### NVIDIA GPU
 - **Device**: {cuda_data['gpu_info']['device_name']}
+- **GPU Cores**: {cuda_data['gpu_info'].get('gpu_cores', 'N/A'):,}
 - **Total Memory**: {cuda_data['gpu_info']['total_memory_gb']:.2f} GB
 - **CUDA Version**: {cuda_data['gpu_info'].get('cuda_version', 'N/A')}
 - **PyTorch Version**: {cuda_data['gpu_info']['pytorch_version']}
 
 ### AMD GPU
 - **Device**: {rocm_data['gpu_info']['device_name']}
+- **GPU Cores**: {rocm_data['gpu_info'].get('gpu_cores', 'N/A'):,}
 - **Total Memory**: {rocm_data['gpu_info']['total_memory_gb']:.2f} GB
 - **ROCm Version**: {rocm_data['gpu_info'].get('rocm_version', 'N/A')}
 - **PyTorch Version**: {rocm_data['gpu_info']['pytorch_version']}
@@ -197,10 +248,10 @@ def generate_comparison_report(cuda_data: Dict, rocm_data: Dict, output_file: st
 
 ### Throughput
 
-| Platform | Steps/Second |
-|----------|--------------|
-| NVIDIA   | {cuda_throughput:.3f} |
-| AMD      | {rocm_throughput:.3f} |
+| Platform | Steps/Second | Steps/Second/Core |
+|----------|--------------|-------------------|
+| NVIDIA   | {cuda_throughput:.3f} | {cuda_data['performance_metrics'].get('throughput_per_gpu_core', 0):.6f} |
+| AMD      | {rocm_throughput:.3f} | {rocm_data['performance_metrics'].get('throughput_per_gpu_core', 0):.6f} |
 
 """
     
@@ -224,6 +275,27 @@ def generate_comparison_report(cuda_data: Dict, rocm_data: Dict, output_file: st
 - **Time Difference**: {abs(cuda_time - rocm_time):.4f} seconds per step
 - **Speedup Factor**: {speedup:.2f}x ({faster_platform} faster)
 - **Efficiency**: {min(cuda_time, rocm_time) / max(cuda_time, rocm_time) * 100:.1f}% (slower platform relative to faster)
+
+### Per-Core Efficiency"""
+    
+    cuda_per_core = cuda_data['performance_metrics'].get('throughput_per_gpu_core', 0)
+    rocm_per_core = rocm_data['performance_metrics'].get('throughput_per_gpu_core', 0)
+    
+    if cuda_per_core > 0 and rocm_per_core > 0:
+        per_core_ratio = cuda_per_core / rocm_per_core
+        more_efficient = "NVIDIA" if per_core_ratio > 1 else "AMD"
+        report += f"""
+- **NVIDIA per-core throughput**: {cuda_per_core:.6f} steps/s/core
+- **AMD per-core throughput**: {rocm_per_core:.6f} steps/s/core
+- **Per-core ratio (NVIDIA/AMD)**: {per_core_ratio:.2f}x
+- **More efficient per core**: {more_efficient}
+"""
+    else:
+        report += """
+- Per-core metrics not available
+"""
+    
+    report += f"""
 
 ### Stability
 - **NVIDIA Variance**: {np.var(cuda_data['raw_step_times'][1:]):.6f}
