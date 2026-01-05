@@ -1,5 +1,6 @@
 from nemo.collections import llm
 import nemo_run as run
+from benchmark_utils import BenchmarkCallback
 
 def run_pretrain():
     # 1. Initialize the recipe
@@ -10,32 +11,35 @@ def run_pretrain():
         num_gpus_per_node=8,
     )
     
-    # 2. MATCH TRAINER TO NVIDIA-SMI HARDWARE
-    # This explicitly tells the trainer to use all 8 GPUs.
-    recipe.trainer.devices = 8
-    recipe.trainer.num_nodes = 1
-    
-    # 3. PARALLELISM CONFIGURATION
-    # TP (4) * PP (1) * CP (1) = 4 GPUs per model instance.
+    # 2. PARALLELISM CONFIGURATION
+    # TP (4) * PP (1) = 4 GPUs per model instance.
     # Total GPUs (8) / 4 = 2-way Data Parallelism.
     recipe.trainer.strategy.tensor_model_parallel_size = 4
     recipe.trainer.strategy.pipeline_model_parallel_size = 1
-    recipe.trainer.strategy.context_parallel_size = 1
     
-    # 4. DATA CONFIGURATION
+    # 3. DATA CONFIGURATION
     # Global Batch Size (8) / Data Parallel (2) = 4 samples per DP group.
     # With Micro Batch Size = 1, this means 4 accumulation steps.
     recipe.data.micro_batch_size = 1
     recipe.data.global_batch_size = 8
     
-    # 5. OPTIMIZATIONS & DURATION
+    # 4. OPTIMIZATIONS & DURATION
     recipe.trainer.max_steps = 10
     recipe.model.config.fp8 = "hybrid"  
     recipe.model.config.fp8_param = True
     
-    # 6. DISABLE PERSISTENCE FOR TEST RUN
+    # 5. DISABLE PERSISTENCE FOR TEST RUN
     recipe.trainer.enable_checkpointing = False
     recipe.resume = None
+    
+    # 6. ADD BENCHMARK CALLBACK FOR AMD vs NVIDIA COMPARISON
+    benchmark_callback = BenchmarkCallback(
+        output_dir="./benchmark_results",
+        platform="auto"  # Auto-detects CUDA or ROCm
+    )
+    if recipe.trainer.callbacks is None:
+        recipe.trainer.callbacks = []
+    recipe.trainer.callbacks.append(benchmark_callback)
     
     # 7. EXECUTE
     run.run(recipe, direct=True)

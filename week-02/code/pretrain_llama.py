@@ -1,7 +1,9 @@
 from nemo.collections import llm
 import nemo_run as run
+from benchmark_utils import BenchmarkCallback
 
 def run_pretrain():
+    # 1. Initialize the recipe
     recipe = llm.llama31_8b.pretrain_recipe(
         name="llama3_1_8b_pretrain_fp8",
         dir="/checkpoints",
@@ -9,30 +11,37 @@ def run_pretrain():
         num_gpus_per_node=8,
     )
     
-    # MINIMAL batch sizes
+    # 2. PARALLELISM CONFIGURATION
+    # TP (4) * PP (1) = 4 GPUs per model instance.
+    # Total GPUs (8) / 4 = 2-way Data Parallelism.
+    recipe.trainer.strategy.tensor_model_parallel_size = 4
+    recipe.trainer.strategy.pipeline_model_parallel_size = 1
+    
+    # 3. DATA CONFIGURATION
+    # Global Batch Size (8) / Data Parallel (2) = 4 samples per DP group.
+    # With Micro Batch Size = 1, this means 4 accumulation steps.
     recipe.data.micro_batch_size = 1
     recipe.data.global_batch_size = 8
     
-    # Very short training
-    recipe.trainer.max_steps = 10  # Reduced from 50
-    
-    # FP8 to save memory
+    # 4. OPTIMIZATIONS & DURATION
+    recipe.trainer.max_steps = 10
     recipe.model.config.fp8 = "hybrid"  
     recipe.model.config.fp8_param = True
     
-    # Tensor parallelism to split model across GPUs
-    recipe.trainer.strategy.tensor_model_parallel_size = 4  # Increased from 2
-    recipe.trainer.strategy.pipeline_model_parallel_size = 1
-    
-    # NO activation checkpointing for now (simplify)
-    # Just use defaults
-    
-    # DISABLE CHECKPOINTING
+    # 5. DISABLE PERSISTENCE FOR TEST RUN
     recipe.trainer.enable_checkpointing = False
-    
-    # Disable resume
     recipe.resume = None
     
+    # 6. ADD BENCHMARK CALLBACK FOR AMD vs NVIDIA COMPARISON
+    benchmark_callback = BenchmarkCallback(
+        output_dir="./benchmark_results",
+        platform="auto"  # Auto-detects CUDA or ROCm
+    )
+    if recipe.trainer.callbacks is None:
+        recipe.trainer.callbacks = []
+    recipe.trainer.callbacks.append(benchmark_callback)
+    
+    # 7. EXECUTE
     run.run(recipe, direct=True)
 
 if __name__ == "__main__":
