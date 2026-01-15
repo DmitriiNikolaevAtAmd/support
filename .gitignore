@@ -93,9 +93,7 @@ comparison_report.md
 *.log
 logs/
 *.out
-*.err
-
-# Temporary files
+*.err# Temporary files
 tmp/
 temp/
 *.tmp
