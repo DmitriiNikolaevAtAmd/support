@@ -125,3 +125,19 @@ Implement fully automated benchmark orchestration with robust logging and checkp
 
 
 
+Best possible config to nvidia and trasfer it to AMD.
+
+Vis both and visually analyse with Perfetto.
+
+To work with raw Traces is required.
+
+Check open source implementation with tokenization and trace generation
+
+Look for bottlenecks in performance.
+
+Throughput is not the first metric to optimize.
+
+Pay attention to GEMs
+
+
+
